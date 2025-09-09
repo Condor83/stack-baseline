@@ -236,6 +236,18 @@ def price(chain_id: int = typer.Option(...), contract: str = typer.Option(...), 
         pretty(r.json())
 
 
+@app.command("tx")
+def tx(
+    chain_id: int = typer.Option(...),
+    tx_hash: str = typer.Option(...),
+):
+    b = base_url()
+    with client() as c:
+        r = c.get(f"{b}/api/v1/tx/{tx_hash}")
+        r.raise_for_status()
+        pretty(r.json())
+
+
 @app.command("pipeline")
 def pipeline(
     chain_id: int = typer.Option(..., help="Chain ID (e.g., 1 for Ethereum)"),

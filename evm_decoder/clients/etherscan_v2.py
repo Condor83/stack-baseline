@@ -1,4 +1,5 @@
 import time
+import json
 from typing import Dict, Generator, Iterable, Optional, List
 
 import httpx
@@ -131,6 +132,35 @@ class EtherscanV2Client:
             for i, t in enumerate(topics):
                 params[f"topic{i}"] = t
         return self._request(params)
+
+    def get_contract_abi(self, address: str) -> Optional[Dict]:
+        data = self._request(
+            {
+                "module": "contract",
+                "action": "getabi",
+                "address": address,
+            }
+        )
+        result = data.get("result")
+        if isinstance(result, str):
+            try:
+                return {"abi": json.loads(result)}
+            except Exception:
+                return None
+        return None
+
+    def get_source_code(self, address: str) -> Optional[Dict]:
+        data = self._request(
+            {
+                "module": "contract",
+                "action": "getsourcecode",
+                "address": address,
+            }
+        )
+        res = data.get("result")
+        if isinstance(res, list) and res:
+            return res[0]
+        return None
 
     def get_tx_receipt(self, tx_hash: str) -> Optional[Dict]:
         """Fetch transaction receipt via Etherscan proxy (JSON-RPC).

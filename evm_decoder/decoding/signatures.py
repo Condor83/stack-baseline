@@ -1,0 +1,7 @@
+UNIV2_SWAP_TOPIC = "0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822"  # Swap(address,uint256,uint256,uint256,uint256,address)
+UNIV3_SWAP_TOPIC = "0xc42079f94a6350d7e6235f29174924f928cc2ac818eb64fedf8356e1df6c1f6e"  # Swap(address,address,int256,int256,uint160,uint128,int24)
+ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+ERC721_TRANSFER_TOPIC = ERC20_TRANSFER_TOPIC
+ERC1155_TRANSFER_SINGLE_TOPIC = "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62"  # TransferSingle(address,address,address,uint256,uint256)
+ERC1155_TRANSFER_BATCH_TOPIC = "0x4a39dc06d4c0dbc64b70b3a0d1c41bd90f04b1a1db5c0f0a1ddf7e4d1a3d66f3"  # TransferBatch(address,address,address,uint256[],uint256[])
+

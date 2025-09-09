@@ -36,6 +36,8 @@ transactions = Table(
     Column("to_address", LargeBinary),
     Column("value", Numeric(78, 0)),
     Column("input", LargeBinary),
+    Column("method_id", LargeBinary),
+    Column("function_name", Text),
     Column("nonce", BigInteger),
     Column("gas", BigInteger),
     Column("gas_price", Numeric(78, 0)),
@@ -145,6 +147,8 @@ def upsert_transaction(conn: Connection, chain_id: int, tx: Dict[str, Any]) -> O
         "to_address": _hex_to_bytes(tx.get("to")),
         "value": _parse_int(tx.get("value")),
         "input": _hex_to_bytes(tx.get("input")),
+        "method_id": _hex_to_bytes(tx.get("methodId")),
+        "function_name": tx.get("functionName"),
         "nonce": _parse_int(tx.get("nonce")),
         "gas": _parse_int(tx.get("gas")),
         "gas_price": _parse_int(tx.get("gasPrice")),
@@ -370,3 +374,15 @@ def update_transaction_receipt_fields(
         .values(status=status, gas_used=gas_used, effective_gas_price=effective_gas_price)
     )
     conn.execute(stmt)
+contracts = Table(
+    "contracts",
+    metadata,
+    Column("address", LargeBinary, primary_key=True),
+    Column("chain_id", Integer, primary_key=True),
+    Column("proxy_type", String),
+    Column("implementation", LargeBinary),
+    Column("beacon", LargeBinary),
+    Column("verified_source", Integer),
+    Column("abi_json", JSONB),
+    Column("first_seen_block", BigInteger),
+)

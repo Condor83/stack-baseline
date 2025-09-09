@@ -8,6 +8,9 @@ pydantic>=2,<3
 pydantic-settings>=2
 python-dotenv
 orjson
+eth-abi>=4
+eth-utils>=2
+hexbytes>=0.3
 typer>=0.12
 SQLAlchemy>=2.0
 psycopg[binary]>=3.1

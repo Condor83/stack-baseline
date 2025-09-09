@@ -87,6 +87,12 @@ def get_tx(tx_hash: str) -> Dict[str, Any]:
         ).fetchone()
     if not row:
         return {"status": "not_found", "tx_hash": tx_hash}
+    try:
+        # Trigger async decode task for enrichment
+        from ..workers.decode import decode_tx as decode_task
+        decode_task.delay(int(row.chain_id), tx_hash)
+    except Exception:
+        pass
     return {
         "chain_id": int(row.chain_id),
         "tx_hash": _to_hex(row.hash),
