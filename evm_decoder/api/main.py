@@ -72,6 +72,7 @@ def get_tx(tx_hash: str) -> Dict[str, Any]:
     with engine.begin() as conn:
         row = conn.execute(
             select(
+                transactions.c.id,
                 transactions.c.chain_id,
                 transactions.c.hash,
                 transactions.c.block_number,
@@ -111,6 +112,17 @@ def get_tx(tx_hash: str) -> Dict[str, Any]:
                 }
     except Exception:
         classification = None
+    # Fetch a few decoded events if present
+    decoded_events: list = []
+    try:
+        events = conn.execute(
+            select(logs.c.decoded_event).where(logs.c.tx_id == row.id, logs.c.decoded_event.isnot(None)).limit(5)
+        ).fetchall()
+        for e in events:
+            decoded_events.append(e.decoded_event)
+    except Exception:
+        pass
+
     resp = {
         "chain_id": int(row.chain_id),
         "tx_hash": _to_hex(row.hash),
@@ -126,6 +138,8 @@ def get_tx(tx_hash: str) -> Dict[str, Any]:
     }
     if classification:
         resp["classification"] = classification
+    if decoded_events:
+        resp["decoded_events"] = decoded_events
     return resp
 
 
