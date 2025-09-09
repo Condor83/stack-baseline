@@ -7,6 +7,9 @@ from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_ex
 
 from ..config import get_settings
 from ..rate_limiter import build_limiter, rps_to_window
+from ..db import get_engine
+from sqlalchemy import select
+from ..storage import prices_tbl
 from ..utils.chains import (
     coingecko_platform,
     coingecko_native_coin_id,
@@ -34,6 +37,7 @@ class PriceService:
         self.http = httpx.Client(timeout=30)
         self.limiter = build_limiter(self.settings.redis_url)
         self.redis = redis_client
+        self.engine = get_engine()
 
     def _cache_key(self, chain_id: int, contract: str, minute: int) -> str:
         return f"price:{chain_id}:{contract.lower()}:{minute}"
@@ -52,10 +56,10 @@ class PriceService:
                 except Exception:
                     pass
 
-        # 2) DB cache (TODO): read from prices table if present
-        # price = self._db_lookup(chain_id, contract, minute)  # not implemented yet
-        # if price is not None:
-        #     return price, "db"
+        # 2) DB cache: read from prices table
+        db_hit = self._db_lookup(chain_id, contract, minute)
+        if db_hit is not None:
+            return db_hit, "db"
 
         # 3) Providers
         price = self._from_coingecko(chain_id, contract, minute)
@@ -70,6 +74,8 @@ class PriceService:
         val, source = price
         if self.redis is not None:
             self.redis.setex(self._cache_key(chain_id, contract, minute), 3600, f"{val}:{source}")
+        # upsert DB
+        self._db_upsert(chain_id, contract, minute, val)
         return price
 
     # --- Providers ---
@@ -183,3 +189,42 @@ class PriceService:
             return None
         # TODO: implement real Alchemy-backed price fallback (if available/desired)
         return None
+
+    # --- DB helpers ---
+    def _db_lookup(self, chain_id: int, contract: str, minute: int) -> Optional[float]:
+        if self.engine is None:
+            return None
+        addr = contract.lower().encode()
+        minute_key = str(minute)
+        with self.engine.begin() as conn:
+            row = conn.execute(
+                select(prices_tbl.c.price_usd).where(
+                    prices_tbl.c.chain_id == chain_id,
+                    prices_tbl.c.contract == addr,
+                    prices_tbl.c.minute == minute_key,
+                )
+            ).fetchone()
+            if row and row[0] is not None:
+                try:
+                    return float(row[0])
+                except Exception:
+                    return None
+        return None
+
+    def _db_upsert(self, chain_id: int, contract: str, minute: int, price: float) -> None:
+        if self.engine is None:
+            return
+        from sqlalchemy.dialects.postgresql import insert
+        addr = contract.lower().encode()
+        minute_key = str(minute)
+        with self.engine.begin() as conn:
+            stmt = insert(prices_tbl).values(
+                chain_id=chain_id,
+                contract=addr,
+                minute=minute_key,
+                price_usd=price,
+            ).on_conflict_do_update(
+                index_elements=[prices_tbl.c.chain_id, prices_tbl.c.contract, prices_tbl.c.minute],
+                set_={"price_usd": price},
+            )
+            conn.execute(stmt)

@@ -386,3 +386,22 @@ contracts = Table(
     Column("abi_json", JSONB),
     Column("first_seen_block", BigInteger),
 )
+prices_tbl = Table(
+    "prices",
+    metadata,
+    Column("chain_id", Integer, primary_key=True),
+    Column("contract", LargeBinary, primary_key=True),
+    Column("minute", String, primary_key=True),  # store ISO minute or epoch minute as string
+    Column("price_usd", Numeric),
+)
+
+classifications_tbl = Table(
+    "classifications",
+    metadata,
+    Column("tx_id", BigInteger, primary_key=True),
+    Column("primary_label", String),
+    Column("secondary_label", String),
+    Column("protocol", String),
+    Column("confidence", Numeric),
+    Column("details_json", JSONB),
+)

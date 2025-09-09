@@ -25,6 +25,8 @@ def decode_tx(chain_id: int, tx_hash: str) -> dict:
                 transactions.c.timestamp,
                 transactions.c.gas_used,
                 transactions.c.effective_gas_price,
+                transactions.c.method_id,
+                transactions.c.function_name,
             ).where(transactions.c.chain_id == chain_id, transactions.c.hash == txh)
         ).fetchone()
         if not tx_row:
@@ -32,6 +34,14 @@ def decode_tx(chain_id: int, tx_hash: str) -> dict:
         tx_id = int(tx_row.id)
         to_addr = tx_row.to_address
         timestamp = int(tx_row.timestamp or 0)
+        method_id = None
+        if tx_row.method_id is not None:
+            try:
+                b = tx_row.method_id.tobytes() if isinstance(tx_row.method_id, memoryview) else tx_row.method_id
+                method_id = "0x" + b.hex()
+            except Exception:
+                method_id = None
+        function_name = tx_row.function_name
 
         # Collect logs for classification
         log_rows = conn.execute(
@@ -51,7 +61,11 @@ def decode_tx(chain_id: int, tx_hash: str) -> dict:
         transfers_count = conn.execute(
             select(token_transfers.c.id).where(token_transfers.c.tx_id == tx_id)
         ).fetchall()
-        c = classify_tx(log_payload, len(transfers_count))
+        # Build to_address hex
+        to_hex = None
+        if to_addr is not None:
+            to_hex = "0x" + (to_addr.tobytes().hex() if isinstance(to_addr, memoryview) else to_addr.hex())
+        c = classify_tx(log_payload, len(transfers_count), chain_id, to_hex, method_id, function_name)
 
         # Cost (USD)
         gas_used = int(tx_row.gas_used or 0)
@@ -64,7 +78,7 @@ def decode_tx(chain_id: int, tx_hash: str) -> dict:
             if pres:
                 usd = (gas_used * egp / 1e18) * pres[0]
 
-        return {
+        result = {
             "status": "ok",
             "chain_id": chain_id,
             "tx_id": tx_id,
@@ -72,6 +86,33 @@ def decode_tx(chain_id: int, tx_hash: str) -> dict:
             "classification": c,
             "cost_usd": usd,
         }
+        # Persist classification
+        try:
+            from sqlalchemy.dialects.postgresql import insert
+            from ..storage import classifications_tbl
+            conn = get_engine().begin()
+            with conn as cc:
+                stmt = insert(classifications_tbl).values(
+                    tx_id=tx_id,
+                    primary_label=c.get("primary_label"),
+                    secondary_label=c.get("secondary_label"),
+                    protocol=c.get("protocol"),
+                    confidence=c.get("confidence"),
+                    details_json={"cost_usd": usd},
+                ).on_conflict_do_update(
+                    index_elements=[classifications_tbl.c.tx_id],
+                    set_={
+                        "primary_label": c.get("primary_label"),
+                        "secondary_label": c.get("secondary_label"),
+                        "protocol": c.get("protocol"),
+                        "confidence": c.get("confidence"),
+                        "details_json": {"cost_usd": usd},
+                    },
+                )
+                cc.execute(stmt)
+        except Exception:
+            pass
+        return result
 
 
 @celery_app.task(name="decode.fetch_traces", queue="decode")

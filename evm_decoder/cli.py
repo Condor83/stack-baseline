@@ -240,9 +240,18 @@ def price(chain_id: int = typer.Option(...), contract: str = typer.Option(...), 
 def tx(
     chain_id: int = typer.Option(...),
     tx_hash: str = typer.Option(...),
+    wait_decode: bool = typer.Option(False, help="Queue a decode task and wait for completion"),
 ):
     b = base_url()
     with client() as c:
+        if wait_decode:
+            # queue decode
+            r = c.post(f"{b}/api/v1/decode/{chain_id}/{tx_hash}")
+            r.raise_for_status()
+            job = r.json()
+            pretty({"decode": job})
+            if job.get("task_id"):
+                _wait_task(c, b, job["task_id"], timeout=180)
         r = c.get(f"{b}/api/v1/tx/{tx_hash}")
         r.raise_for_status()
         pretty(r.json())

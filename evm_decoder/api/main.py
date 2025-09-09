@@ -87,13 +87,31 @@ def get_tx(tx_hash: str) -> Dict[str, Any]:
         ).fetchone()
     if not row:
         return {"status": "not_found", "tx_hash": tx_hash}
+    # Attach classification if present
+    classification = None
     try:
-        # Trigger async decode task for enrichment
-        from ..workers.decode import decode_tx as decode_task
-        decode_task.delay(int(row.chain_id), tx_hash)
+        from ..storage import classifications_tbl
+        with get_engine().begin() as conn:
+            c_row = conn.execute(
+                select(
+                    classifications_tbl.c.primary_label,
+                    classifications_tbl.c.secondary_label,
+                    classifications_tbl.c.protocol,
+                    classifications_tbl.c.confidence,
+                    classifications_tbl.c.details_json,
+                ).where(classifications_tbl.c.tx_id == select(transactions.c.id).where(transactions.c.hash == txh).scalar_subquery())
+            ).fetchone()
+            if c_row:
+                classification = {
+                    "primary_label": c_row.primary_label,
+                    "secondary_label": c_row.secondary_label,
+                    "protocol": c_row.protocol,
+                    "confidence": float(c_row.confidence) if c_row.confidence is not None else None,
+                    "details": c_row.details_json,
+                }
     except Exception:
-        pass
-    return {
+        classification = None
+    resp = {
         "chain_id": int(row.chain_id),
         "tx_hash": _to_hex(row.hash),
         "block_number": _to_int(row.block_number),
@@ -106,6 +124,9 @@ def get_tx(tx_hash: str) -> Dict[str, Any]:
         "gas_used": _to_int(row.gas_used),
         "effective_gas_price": _to_int(row.effective_gas_price),
     }
+    if classification:
+        resp["classification"] = classification
+    return resp
 
 
 @app.get("/api/v1/wallets/{address}/portfolio")
@@ -462,4 +483,11 @@ def address_token_transfers(
 @app.post("/api/v1/traces/{chain_id}/{tx_hash}")
 def request_traces(chain_id: int, tx_hash: str) -> Dict[str, Any]:
     task = fetch_traces.delay(chain_id, tx_hash)
+    return {"task_id": task.id, "status": "queued"}
+
+
+@app.post("/api/v1/decode/{chain_id}/{tx_hash}")
+def request_decode(chain_id: int, tx_hash: str) -> Dict[str, Any]:
+    from ..workers.decode import decode_tx as decode_task
+    task = decode_task.delay(chain_id, tx_hash)
     return {"task_id": task.id, "status": "queued"}
