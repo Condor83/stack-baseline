@@ -7,6 +7,7 @@ from ..storage import _hex_to_bytes
 from ..decoding.abi_resolver import resolve_and_cache_abi
 from ..decoding.classifier import classify_tx
 from ..clients.prices import PriceService
+from ..decoding.decoder import decode_and_store_logs
 
 
 @celery_app.task(name="decode.decode_tx", queue="decode")
@@ -78,6 +79,12 @@ def decode_tx(chain_id: int, tx_hash: str) -> dict:
             if pres:
                 usd = (gas_used * egp / 1e18) * pres[0]
 
+        # Decode and store events (best-effort)
+        try:
+            decoded_count = decode_and_store_logs(chain_id, tx_id)
+        except Exception:
+            decoded_count = 0
+
         result = {
             "status": "ok",
             "chain_id": chain_id,
@@ -85,6 +92,7 @@ def decode_tx(chain_id: int, tx_hash: str) -> dict:
             "tx_hash": tx_hash,
             "classification": c,
             "cost_usd": usd,
+            "decoded_events": decoded_count,
         }
         # Persist classification
         try:
