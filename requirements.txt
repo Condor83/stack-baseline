@@ -1,0 +1,10 @@
+fastapi
+uvicorn[standard]
+celery>=5
+redis>=5
+httpx
+tenacity
+pydantic>=2,<3
+pydantic-settings>=2
+python-dotenv
+orjson
