@@ -7,7 +7,7 @@ from ..storage import _hex_to_bytes
 from ..decoding.abi_resolver import resolve_and_cache_abi
 from ..decoding.classifier import classify_tx
 from ..clients.prices import PriceService
-from ..decoding.decoder import decode_and_store_logs
+from ..decoding.decoder import decode_and_store_logs, decode_call_input
 
 
 @celery_app.task(name="decode.decode_tx", queue="decode")
@@ -28,6 +28,7 @@ def decode_tx(chain_id: int, tx_hash: str) -> dict:
                 transactions.c.effective_gas_price,
                 transactions.c.method_id,
                 transactions.c.function_name,
+                transactions.c.input,
             ).where(transactions.c.chain_id == chain_id, transactions.c.hash == txh)
         ).fetchone()
         if not tx_row:
@@ -85,6 +86,15 @@ def decode_tx(chain_id: int, tx_hash: str) -> dict:
         except Exception:
             decoded_count = 0
 
+        # Decode call input (best-effort)
+        try:
+            input_bytes = None
+            if tx_row.input is not None:
+                input_bytes = tx_row.input.tobytes() if isinstance(tx_row.input, memoryview) else tx_row.input
+            call_decoded = decode_call_input(chain_id, to_hex, input_bytes)
+        except Exception:
+            call_decoded = None
+
         result = {
             "status": "ok",
             "chain_id": chain_id,
@@ -93,6 +103,7 @@ def decode_tx(chain_id: int, tx_hash: str) -> dict:
             "classification": c,
             "cost_usd": usd,
             "decoded_events": decoded_count,
+            "decoded_call": call_decoded,
         }
         # Persist classification
         try:
@@ -106,7 +117,7 @@ def decode_tx(chain_id: int, tx_hash: str) -> dict:
                     secondary_label=c.get("secondary_label"),
                     protocol=c.get("protocol"),
                     confidence=c.get("confidence"),
-                    details_json={"cost_usd": usd},
+                    details_json={"cost_usd": usd, "decoded_call": call_decoded},
                 ).on_conflict_do_update(
                     index_elements=[classifications_tbl.c.tx_id],
                     set_={
@@ -114,7 +125,7 @@ def decode_tx(chain_id: int, tx_hash: str) -> dict:
                         "secondary_label": c.get("secondary_label"),
                         "protocol": c.get("protocol"),
                         "confidence": c.get("confidence"),
-                        "details_json": {"cost_usd": usd},
+                        "details_json": {"cost_usd": usd, "decoded_call": call_decoded},
                     },
                 )
                 cc.execute(stmt)

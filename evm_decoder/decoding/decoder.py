@@ -7,14 +7,25 @@ from ..storage import logs as logs_tbl
 from ..decoding.abi_resolver import resolve_and_cache_abi
 from .abi_utils import build_abi_index
 from ..storage import _hex_to_bytes
+from ..clients.abi import ABIResolver
 
 
-def decode_call_input(to_address: Optional[str], input_bytes: Optional[bytes]) -> Optional[Dict[str, Any]]:
+def decode_call_input(chain_id: int, to_address: Optional[str], input_bytes: Optional[bytes]) -> Optional[Dict[str, Any]]:
     if to_address is None or input_bytes is None or len(input_bytes) < 4:
         return None
-    abi = resolve_and_cache_abi(to_address, _infer_chain_id())  # chain id inference placeholder
+    abi = resolve_and_cache_abi(to_address, chain_id)
     if not abi:
-        return None
+        # 4byte fallback to name only
+        selector = input_bytes[:4]
+        sel_hex = "0x" + selector.hex()
+        try:
+            resolver = ABIResolver()
+            name = resolver.fetch_from_4byte(sel_hex)
+            if name:
+                return {"name": name, "selector": sel_hex, "args": None}
+        except Exception:
+            pass
+        return {"name": None, "selector": sel_hex, "args": None}
     fn_index, _ = build_abi_index(abi)
     selector = input_bytes[:4]
     fn = fn_index.get(selector)
@@ -127,9 +138,4 @@ def _to_jsonable(val: Any) -> Any:
         return val
     except Exception:
         return str(val)
-
-
-def _infer_chain_id() -> int:
-    # Placeholder; decode_call_input should be provided chain_id by caller in future
-    return 1
 

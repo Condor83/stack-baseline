@@ -17,6 +17,7 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.dialects.postgresql import insert, JSONB
+from sqlalchemy import Boolean
 from sqlalchemy.engine import Connection
 
 
@@ -382,7 +383,7 @@ contracts = Table(
     Column("proxy_type", String),
     Column("implementation", LargeBinary),
     Column("beacon", LargeBinary),
-    Column("verified_source", Integer),
+    Column("verified_source", Boolean),
     Column("abi_json", JSONB),
     Column("first_seen_block", BigInteger),
 )
