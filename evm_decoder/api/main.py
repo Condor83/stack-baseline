@@ -16,6 +16,7 @@ from ..db import get_engine
 from sqlalchemy import select, and_, or_, func
 from ..storage import transactions, logs, token_transfers
 from decimal import Decimal
+from ..decoding.decoder import decode_call_input
 
 
 def _to_hex(value):
@@ -84,6 +85,7 @@ def get_tx(tx_hash: str) -> Dict[str, Any]:
                 transactions.c.status,
                 transactions.c.gas_used,
                 transactions.c.effective_gas_price,
+                transactions.c.input,
             ).where(transactions.c.hash == txh)
         ).fetchone()
     if not row:
@@ -136,10 +138,29 @@ def get_tx(tx_hash: str) -> Dict[str, Any]:
         "gas_used": _to_int(row.gas_used),
         "effective_gas_price": _to_int(row.effective_gas_price),
     }
+    # Attempt to decode call (best-effort) if not already in classification details
+    decoded_call = None
+    if classification and isinstance(classification.get("details"), dict):
+        decoded_call = classification["details"].get("decoded_call")
+    if not decoded_call:
+        try:
+            to_hex_addr = _to_hex(row.to_address)
+            input_bytes = None
+            if row.input is not None:
+                input_bytes = row.input.tobytes() if isinstance(row.input, memoryview) else row.input
+            if to_hex_addr and input_bytes:
+                decoded = decode_call_input(int(row.chain_id), to_hex_addr, input_bytes)
+                if decoded:
+                    decoded_call = decoded
+        except Exception:
+            decoded_call = None
+
     if classification:
         resp["classification"] = classification
     if decoded_events:
         resp["decoded_events"] = decoded_events
+    if decoded_call:
+        resp["decoded_call"] = decoded_call
     return resp
 
 
