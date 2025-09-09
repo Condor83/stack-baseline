@@ -29,9 +29,11 @@ class Settings(BaseSettings):
     etherscan_rps: float = Field(5, env=["ETHERSCAN_RPS", "etherscan_rps"]) 
     coingecko_rps: float = Field(2, env=["COINGECKO_RPS", "coingecko_rps"]) 
     llama_rps: float = Field(5, env=["LLAMA_RPS", "llama_rps"]) 
+    etherscan_page_size: int = Field(1000, env=["ETHERSCAN_PAGE_SIZE", "etherscan_page_size"]) 
 
     # Budgets
     price_daily_budget_alchemy: int = Field(0, env="PRICE_DAILY_BUDGET_ALCHEMY")
+    traces_daily_budget_alchemy: int = Field(0, env=["TRACES_DAILY_BUDGET_ALCHEMY", "traces_daily_budget_alchemy"]) 
 
     # Chains enabled by default
     enabled_chains_raw: str = Field(

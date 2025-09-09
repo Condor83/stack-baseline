@@ -44,9 +44,9 @@ Database (Postgres/Supabase)
 
 Ingestion endpoints and tasks
 - Trigger address ingest (queues a Celery task):
-  - `POST /api/v1/ingest/address` with JSON `{ "chain_id": 1, "address": "0x...", "start_block": 0, "end_block": 99999999, "window": 10000 }`
-  - Or by date/time: `POST /api/v1/ingest/address_by_date` with `{ "chain_id": 1, "address": "0x...", "start": "2024-01-01T00:00:00Z", "end": "2024-01-02", "window": 10000 }`
-    - `start`/`end` accept epoch seconds or ISO8601 (YYYY-MM-DD, or full timestamp; Z or timezone offsets supported).
+  - By date (recommended): `POST /api/v1/ingest/address_by_date` with `{ "chain_id": 1, "address": "0x...", "start": "2024-01-01", "end": "2024-01-31" }`
+    - The system maps dates → blocks and adaptively splits block ranges to avoid provider caps.
+  - Block-range endpoint remains available for power users: `POST /api/v1/ingest/address`.
 - Check task status:
   - `GET /api/v1/tasks/{task_id}` → `{ state: PENDING|STARTED|SUCCESS|FAILURE, result?: any }`
 - Workers to run:
@@ -57,16 +57,36 @@ Ingestion endpoints and tasks
   - Logs → `logs` table (per-receipt logs, linked via `tx_id`)
   - Token transfers → `token_transfers` (ERC-20/721 from logs)
   - Internal txs → `internal_transactions` via Etherscan `txlistinternal`
+  - Traces (optional) → `traces` via Alchemy `trace_transaction` (budgeted)
 
 Validation endpoints
 - Address summary: `GET /api/v1/address/{chain_id}/{address}/summary?from_block=&to_block=`
 - Address transactions: `GET /api/v1/address/{chain_id}/{address}/transactions?limit=25&offset=0&from_block=&to_block=`
 - Address logs: `GET /api/v1/address/{chain_id}/{address}/logs?limit=25&offset=0&from_block=&to_block=`
 - Address token transfers: `GET /api/v1/address/{chain_id}/{address}/token_transfers?limit=25&offset=0&from_block=&to_block=`
+- Request traces for a tx: `POST /api/v1/traces/{chain_id}/{tx_hash}` and poll `/api/v1/tasks/{task_id}`
 
 Smoke test script
 - Run: `python scripts/smoke_api.py 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48 --chain-id 1 --from-block 18000000 --to-block 18001000 --ingest`
 - Options: `--base-url`, `--limit/--offset`, `--price-ts`.
+
+CLI (optional)
+- Base URL: set `API_BASE_URL` (defaults to `http://127.0.0.1:8000`).
+- Usage: `python -m evm_decoder.cli --help`
+- Examples:
+  - Ingest by date (and wait):
+    - `python3 -m evm_decoder.cli ingest-by-date --chain-id 1 --address 0xbce83d5060a7d7007fd7ca17301c1e5131b2d50e --start-date 2025-08-01 --end-date 2025-08-31 --wait`
+  - Summary:
+    - `python -m evm_decoder.cli summary --chain-id 1 --address 0xbce83d5060a7d7007fd7ca17301c1e5131b2d50e`
+  - Transfers:
+    - `python -m evm_decoder.cli transfers --chain-id 1 --address 0xbce83d5060a7d7007fd7ca17301c1e5131b2d50e --limit 10`
+  - Traces:
+    - `python3 -m evm_decoder.cli traces --chain-id 1 --tx-hash 0x... --wait`
+  - Interactive menu (press / for menu):
+    - `python3 -m evm_decoder.cli shell`
+    - Defaults (override via env): `DEFAULT_WALLET`, `DEFAULT_CHAIN_ID`, `DEFAULT_WINDOW`
+  - One-shot pipeline (ingest by date, optional traces):
+    - `python3 -m evm_decoder.cli pipeline --chain-id 1 --address 0xbce83d5060a7d7007fd7ca17301c1e5131b2d50e --start-date 2025-08-01 --end-date 2025-08-31 --traces --max-traces 5`
 
 Supabase CLI workflow (optional but recommended)
 - `supabase start` or `supabase db start` to run local stack.
@@ -76,9 +96,9 @@ Supabase CLI workflow (optional but recommended)
 - Link and push to remote: `supabase link --project-ref <ref>` then `supabase db push`.
 
 Traces (Alchemy, optional)
-- Client stub added in `evm_decoder/clients/alchemy.py` for `trace_transaction` and `debug_traceTransaction`.
-- Disabled by default unless `ALCHEMY_API_KEY` is set and invoked by a worker.
-- Next: add budget guard and per-chain host mapping (eth-mainnet, arb-mainnet, opt-mainnet, etc.).
+- Client and decode task added.
+- Enable with `ALCHEMY_API_KEY` and a daily budget: `TRACES_DAILY_BUDGET_ALCHEMY` (>0).
+- Per-chain hosts supported: ETH, Arbitrum, Optimism, Base, Polygon.
 
 Redis notes
 - We use Redis for: Celery broker/results, rate limiting, and simple caches.

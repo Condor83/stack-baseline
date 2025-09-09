@@ -9,6 +9,7 @@ from ..clients.prices import PriceService
 from ..utils.chains import is_native_address
 from ..clients.etherscan_v2 import EtherscanV2Client
 from ..workers.ingest import fetch_account_txs
+from ..workers.decode import fetch_traces
 from ..celery_app import celery_app
 from celery.result import AsyncResult
 from ..db import get_engine
@@ -61,7 +62,44 @@ def health() -> Dict[str, Any]:
 
 @app.get("/api/v1/tx/{tx_hash}")
 def get_tx(tx_hash: str) -> Dict[str, Any]:
-    return {"status": "not_implemented", "tx_hash": tx_hash}
+    engine = get_engine()
+    if engine is None:
+        return {"status": "not_implemented", "tx_hash": tx_hash}
+    try:
+        txh = bytes.fromhex(tx_hash.lower().removeprefix("0x"))
+    except Exception:
+        return {"status": "error", "error": "invalid_tx_hash"}
+    with engine.begin() as conn:
+        row = conn.execute(
+            select(
+                transactions.c.chain_id,
+                transactions.c.hash,
+                transactions.c.block_number,
+                transactions.c.transaction_index,
+                transactions.c.timestamp,
+                transactions.c.from_address,
+                transactions.c.to_address,
+                transactions.c.value,
+                transactions.c.status,
+                transactions.c.gas_used,
+                transactions.c.effective_gas_price,
+            ).where(transactions.c.hash == txh)
+        ).fetchone()
+    if not row:
+        return {"status": "not_found", "tx_hash": tx_hash}
+    return {
+        "chain_id": int(row.chain_id),
+        "tx_hash": _to_hex(row.hash),
+        "block_number": _to_int(row.block_number),
+        "transaction_index": _to_int(row.transaction_index),
+        "timestamp": _to_int(row.timestamp),
+        "from": _to_hex(row.from_address),
+        "to": _to_hex(row.to_address),
+        "value": _to_str_number(row.value),
+        "status": _to_int(row.status),
+        "gas_used": _to_int(row.gas_used),
+        "effective_gas_price": _to_int(row.effective_gas_price),
+    }
 
 
 @app.get("/api/v1/wallets/{address}/portfolio")
@@ -164,6 +202,10 @@ def ingest_address_by_date(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any
 def task_status(task_id: str) -> Dict[str, Any]:
     r = AsyncResult(task_id, app=celery_app)
     payload: Dict[str, Any] = {"task_id": task_id, "state": r.state}
+    # Include meta/progress if available
+    info = getattr(r, "info", None)
+    if isinstance(info, dict):
+        payload["meta"] = info
     if r.successful():
         try:
             payload["result"] = r.get(timeout=0)
@@ -409,3 +451,9 @@ def address_token_transfers(
             "token_id": _to_int(r.token_id),
         })
     return {"items": out, "limit": limit, "offset": offset}
+
+
+@app.post("/api/v1/traces/{chain_id}/{tx_hash}")
+def request_traces(chain_id: int, tx_hash: str) -> Dict[str, Any]:
+    task = fetch_traces.delay(chain_id, tx_hash)
+    return {"task_id": task.id, "status": "queued"}

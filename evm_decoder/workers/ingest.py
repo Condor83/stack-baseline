@@ -16,17 +16,34 @@ from ..clients.etherscan_v2 import EtherscanV2Client
 from ..storage import _parse_int, _hex_to_bytes
 
 
-@celery_app.task(name="ingest.fetch_account_txs", queue="ingest")
-def fetch_account_txs(chain_id: int, address: str, start_block: int, end_block: int, window: int = 10000) -> int:
+@celery_app.task(name="ingest.fetch_account_txs", queue="ingest", bind=True)
+def fetch_account_txs(self, chain_id: int, address: str, start_block: int, end_block: int, window: int = 10000) -> int:
     """Fetch and persist transactions for an address using block windows. Returns total txs fetched."""
     client = EtherscanV2Client(chain_id)
     total = 0
     engine = get_engine()
     txhash_to_id: Dict[bytes, int] = {}
 
-    for page in client.iter_txlist_block_windows(address, start_block, end_block, window):
-        result = page.get("result", [])
+    # Page-based pagination inside date-derived block range (website-like UX)
+    page_size = getattr(client.settings, "etherscan_page_size", 1000)
+    pages = 0
+    receipts = 0
+    transfers = 0
+    logs_total = 0
+    for result in client.iter_txlist_pages(address, start_block, end_block, page_size, sort="asc"):
+        result = result or []
         total += len(result)
+        pages += 1
+        try:
+            self.update_state(state="PROGRESS", meta={
+                "stage": "txlist",
+                "pages": pages,
+                "txs": total,
+                "start_block": start_block,
+                "end_block": end_block,
+            })
+        except Exception:
+            pass
         if engine is None:
             continue
         with session_scope() as conn:
@@ -40,19 +57,33 @@ def fetch_account_txs(chain_id: int, address: str, start_block: int, end_block: 
                         bh = bytes.fromhex(txh[2:])
                         txhash_to_id[bh] = tx_id
                     except Exception:
-                        pass
+                        bh = None
+                else:
+                    bh = None
                 # Fetch receipt and persist logs + token transfers
-                if txh:
+                if txh and bh is not None:
                     rcpt = client.get_tx_receipt(txh)
                     if rcpt:
+                        receipts += 1
                         status = _parse_int(rcpt.get("status"))  # hex 0x1/0x0
                         gas_used = _parse_int(rcpt.get("gasUsed"))
                         egp = _parse_int(rcpt.get("effectiveGasPrice"))
                         update_transaction_receipt_fields(conn, chain_id, bh, status, gas_used, egp)
                         logs_payload = rcpt.get("logs") or []
                         if logs_payload:
-                            insert_logs_for_tx(conn, tx_id, logs_payload)
-                            insert_token_transfers_from_logs(conn, chain_id, tx_id, logs_payload)
+                            logs_total += insert_logs_for_tx(conn, tx_id, logs_payload)
+                            transfers += insert_token_transfers_from_logs(conn, chain_id, tx_id, logs_payload)
+                        try:
+                            self.update_state(state="PROGRESS", meta={
+                                "stage": "receipts",
+                                "pages": pages,
+                                "txs": total,
+                                "receipts": receipts,
+                                "logs": logs_total,
+                                "transfers": transfers,
+                            })
+                        except Exception:
+                            pass
 
     # Internal txs for the same address and block range
     ingest_internal_transactions(chain_id, address, start_block, end_block, window, txhash_to_id)
@@ -67,13 +98,10 @@ def ingest_internal_transactions(
         return 0
     client = EtherscanV2Client(chain_id)
     total = 0
-    cur = start_block
-    while cur <= end_block:
-        w_end = min(end_block, cur + window - 1)
-        resp = client.get_internal_txs(address=address, startblock=cur, endblock=w_end)
-        items = resp.get("result", [])
+    internal_pages = 0
+    internal_count = 0
+    for items in client.iter_internal_txs_pages(address, start_block, end_block, page_size, sort="asc"):
         if not items:
-            cur = w_end + 1
             continue
         with session_scope() as conn:
             for it in items:
@@ -104,6 +132,16 @@ def ingest_internal_transactions(
                     "gas_used": _parse_int(it.get("gasUsed")),
                 }
                 conn.execute(internal_txs.insert().values(**values))
-                total += 1
-        cur = w_end + 1
+                internal_count += 1
+        internal_pages += 1
+        try:
+            self.update_state(state="PROGRESS", meta={
+                "stage": "internal",
+                "internal_pages": internal_pages,
+                "internal_count": internal_count,
+                "txs": total,
+                "receipts": receipts,
+            })
+        except Exception:
+            pass
     return total

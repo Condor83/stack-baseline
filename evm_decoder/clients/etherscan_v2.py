@@ -1,5 +1,5 @@
 import time
-from typing import Dict, Generator, Iterable, Optional
+from typing import Dict, Generator, Iterable, Optional, List
 
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
@@ -72,6 +72,8 @@ class EtherscanV2Client:
         startblock: Optional[int] = None,
         endblock: Optional[int] = None,
         sort: str = "asc",
+        page: Optional[int] = None,
+        offset: Optional[int] = None,
     ) -> Dict:
         return self._request(
             {
@@ -81,6 +83,8 @@ class EtherscanV2Client:
                 **({"startblock": str(startblock)} if startblock is not None else {}),
                 **({"endblock": str(endblock)} if endblock is not None else {}),
                 "sort": sort,
+                **({"page": str(page)} if page is not None else {}),
+                **({"offset": str(offset)} if offset is not None else {}),
             }
         )
 
@@ -90,6 +94,8 @@ class EtherscanV2Client:
         startblock: Optional[int] = None,
         endblock: Optional[int] = None,
         sort: str = "asc",
+        page: Optional[int] = None,
+        offset: Optional[int] = None,
     ) -> Dict:
         return self._request(
             {
@@ -99,6 +105,8 @@ class EtherscanV2Client:
                 **({"startblock": str(startblock)} if startblock is not None else {}),
                 **({"endblock": str(endblock)} if endblock is not None else {}),
                 "sort": sort,
+                **({"page": str(page)} if page is not None else {}),
+                **({"offset": str(offset)} if offset is not None else {}),
             }
         )
 
@@ -186,3 +194,98 @@ class EtherscanV2Client:
             w_end = min(end_block, cur + window - 1)
             yield self.get_txlist(address, startblock=cur, endblock=w_end)
             cur = w_end + 1
+
+    def iter_txlist_adaptive(
+        self,
+        address: str,
+        start_block: int,
+        end_block: int,
+        max_items: int = 8000,
+        min_span: int = 500,
+    ) -> Generator[List[Dict], None, None]:
+        """Recursively fetch txlist over [start_block, end_block], splitting ranges
+        when a single call returns too many items (>= max_items). This avoids
+        hidden truncation caps while keeping calls minimal.
+
+        Yields lists of tx dicts.
+        """
+
+        def fetch_range(a: int, b: int) -> Generator[List[Dict], None, None]:
+            if a > b:
+                return
+            data = self.get_txlist(address, startblock=a, endblock=b)
+            result = data.get("result") or []
+            # If result size is very large and span is still sizable, split
+            if isinstance(result, list) and len(result) >= max_items and (b - a) > min_span:
+                mid = a + (b - a) // 2
+                yield from fetch_range(a, mid)
+                yield from fetch_range(mid + 1, b)
+            else:
+                # return the current chunk
+                if isinstance(result, list):
+                    yield result
+
+        yield from fetch_range(start_block, end_block)
+
+    def iter_txlist_pages(
+        self,
+        address: str,
+        start_block: int,
+        end_block: int,
+        page_size: int,
+        sort: str = "asc",
+    ) -> Generator[List[Dict], None, None]:
+        page = 1
+        while True:
+            data = self.get_txlist(address, startblock=start_block, endblock=end_block, sort=sort, page=page, offset=page_size)
+            result = data.get("result") or []
+            if not isinstance(result, list) or len(result) == 0:
+                break
+            yield result
+            if len(result) < page_size:
+                break
+            page += 1
+
+    def iter_internal_txs_pages(
+        self,
+        address: str,
+        start_block: int,
+        end_block: int,
+        page_size: int,
+        sort: str = "asc",
+    ) -> Generator[List[Dict], None, None]:
+        page = 1
+        while True:
+            data = self.get_internal_txs(address, startblock=start_block, endblock=end_block, sort=sort, page=page, offset=page_size)
+            result = data.get("result") or []
+            if not isinstance(result, list) or len(result) == 0:
+                break
+            yield result
+            if len(result) < page_size:
+                break
+            page += 1
+
+    def iter_internal_txs_adaptive(
+        self,
+        address: str,
+        start_block: int,
+        end_block: int,
+        max_items: int = 8000,
+        min_span: int = 500,
+    ) -> Generator[List[Dict], None, None]:
+        """Recursively fetch txlistinternal with adaptive splitting."""
+
+        def fetch_range(a: int, b: int) -> Generator[List[Dict], None, None]:
+            if a > b:
+                return
+            data = self.get_internal_txs(address, startblock=a, endblock=b)
+            result = data.get("result") or []
+            if isinstance(result, list) and len(result) >= max_items and (b - a) > min_span:
+                mid = a + (b - a) // 2
+                yield from fetch_range(a, mid)
+                yield from fetch_range(mid + 1, b)
+            else:
+                if isinstance(result, list):
+                    yield result
+
+        yield from fetch_range(start_block, end_block)

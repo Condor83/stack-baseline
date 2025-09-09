@@ -13,6 +13,7 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    delete,
     select,
 )
 from sqlalchemy.dialects.postgresql import insert, JSONB
@@ -213,51 +214,149 @@ def insert_token_transfers_from_logs(
         if not topics:
             continue
         topic0 = topics[0].lower() if isinstance(topics[0], str) else None
-        if topic0 != ERC_TRANSFER_SIG:
-            continue
         addr = _hex_to_bytes(l.get("address"))
         li = _parse_int(l.get("logIndex"))
         if addr is None:
             continue
-        # ERC-20 Transfer: topics length == 3 (topic0, from, to); value in data
-        # ERC-721 Transfer: topics length == 4 (topic0, from, to, tokenId); value absent
-        if len(topics) == 3:
-            from_addr = _topic_to_address(topics[1])
-            to_addr = _topic_to_address(topics[2])
-            value = _parse_int(l.get("data"))
-            rows.append(
-                {
-                    "chain_id": chain_id,
-                    "tx_id": tx_id,
-                    "log_index": li,
-                    "token_address": addr,
-                    "from_address": from_addr,
-                    "to_address": to_addr,
-                    "standard": "erc20",
-                    "value": value,
-                    "token_id": None,
-                }
-            )
-        elif len(topics) == 4:
-            from_addr = _topic_to_address(topics[1])
-            to_addr = _topic_to_address(topics[2])
-            token_id = _parse_int(topics[3])
-            rows.append(
-                {
-                    "chain_id": chain_id,
-                    "tx_id": tx_id,
-                    "log_index": li,
-                    "token_address": addr,
-                    "from_address": from_addr,
-                    "to_address": to_addr,
-                    "standard": "erc721",
-                    "value": None,
-                    "token_id": token_id,
-                }
-            )
+        # ERC-20/721 share the same Transfer(...) signature
+        if topic0 == ERC_TRANSFER_SIG:
+            if len(topics) == 3:
+                # ERC-20 Transfer(address,address,uint256) value in data
+                from_addr = _topic_to_address(topics[1])
+                to_addr = _topic_to_address(topics[2])
+                value = _parse_int(l.get("data"))
+                rows.append(
+                    {
+                        "chain_id": chain_id,
+                        "tx_id": tx_id,
+                        "log_index": li,
+                        "token_address": addr,
+                        "from_address": from_addr,
+                        "to_address": to_addr,
+                        "standard": "erc20",
+                        "value": value,
+                        "token_id": None,
+                    }
+                )
+            elif len(topics) == 4:
+                # ERC-721 Transfer(address,address,uint256) tokenId in topic3, no data
+                from_addr = _topic_to_address(topics[1])
+                to_addr = _topic_to_address(topics[2])
+                token_id = _parse_int(topics[3])
+                rows.append(
+                    {
+                        "chain_id": chain_id,
+                        "tx_id": tx_id,
+                        "log_index": li,
+                        "token_address": addr,
+                        "from_address": from_addr,
+                        "to_address": to_addr,
+                        "standard": "erc721",
+                        "value": None,
+                        "token_id": token_id,
+                    }
+                )
+            continue
+        # ERC-1155 TransferSingle/TransferBatch detection by data payload patterns
+        data_hex = l.get("data")
+        if isinstance(data_hex, str) and data_hex.startswith("0x"):
+            dbytes = bytes.fromhex(data_hex[2:])
+            # Topics len 4, data size == 64 -> TransferSingle
+            if len(topics) == 4 and len(dbytes) == 64:
+                from_addr = _topic_to_address(topics[2])
+                to_addr = _topic_to_address(topics[3])
+                token_id = int.from_bytes(dbytes[0:32], byteorder="big")
+                value = int.from_bytes(dbytes[32:64], byteorder="big")
+                rows.append(
+                    {
+                        "chain_id": chain_id,
+                        "tx_id": tx_id,
+                        "log_index": li,
+                        "token_address": addr,
+                        "from_address": from_addr,
+                        "to_address": to_addr,
+                        "standard": "erc1155",
+                        "value": value,
+                        "token_id": token_id,
+                    }
+                )
+            # Topics len 4, data encodes two dynamic arrays: ids and values
+            elif len(topics) == 4 and len(dbytes) >= 128:
+                try:
+                    # Parse simple ABI dynamic arrays: [offset_ids][offset_vals] then arrays at offsets
+                    def read_u256(off):
+                        return int.from_bytes(dbytes[off:off+32], "big")
+
+                    off_ids = read_u256(0)
+                    off_vals = read_u256(32)
+                    # ids array
+                    n_ids = read_u256(off_ids)
+                    ids = [read_u256(off_ids + 32 + i * 32) for i in range(n_ids)]
+                    # values array
+                    n_vals = read_u256(off_vals)
+                    vals = [read_u256(off_vals + 32 + i * 32) for i in range(n_vals)]
+                    n = min(len(ids), len(vals))
+                    from_addr = _topic_to_address(topics[2])
+                    to_addr = _topic_to_address(topics[3])
+                    for i in range(n):
+                        rows.append(
+                            {
+                                "chain_id": chain_id,
+                                "tx_id": tx_id,
+                                "log_index": li,
+                                "token_address": addr,
+                                "from_address": from_addr,
+                                "to_address": to_addr,
+                                "standard": "erc1155",
+                                "value": int(vals[i]),
+                                "token_id": int(ids[i]),
+                            }
+                        )
+                except Exception:
+                    pass
     if not rows:
         return 0
     conn.execute(insert(token_transfers), rows)
+    return len(rows)
+
+
+def refresh_traces_for_tx(conn: Connection, tx_id: int, chain_id: int, tx_hash: bytes, traces_payload: List[Dict[str, Any]]) -> int:
+    # Remove existing traces for the tx_id and insert new ones
+    conn.execute(delete(traces).where(traces.c.tx_id == tx_id))
+    rows = []
+    for t in traces_payload or []:
+        # action/result fields are provider-specific; keep full json in *_json columns
+        action = t.get("action", {}) if isinstance(t, dict) else {}
+        result = t.get("result", {}) if isinstance(t, dict) else {}
+        typ = t.get("type")
+        trace_addr = t.get("traceAddress") or []
+        if isinstance(trace_addr, list):
+            trace_address = [int(x) for x in trace_addr if isinstance(x, (int, str)) and str(x).isdigit()]
+        else:
+            trace_address = None
+        from_b = _hex_to_bytes(action.get("from")) if isinstance(action, dict) else None
+        to_b = _hex_to_bytes(action.get("to")) if isinstance(action, dict) else None
+        input_b = _hex_to_bytes(action.get("input")) if isinstance(action, dict) else None
+        output_b = _hex_to_bytes(result.get("output")) if isinstance(result, dict) else None
+        value_i = _parse_int(action.get("value")) if isinstance(action, dict) else None
+        err = t.get("error")
+        rows.append(
+            {
+                "tx_id": tx_id,
+                "trace_address": trace_address,
+                "type": typ,
+                "from": from_b,
+                "to": to_b,
+                "input": input_b,
+                "output": output_b,
+                "value": value_i,
+                "error": err,
+                "action_json": action if isinstance(action, dict) else None,
+                "result_json": result if isinstance(result, dict) else None,
+            }
+        )
+    if rows:
+        conn.execute(insert(traces), rows)
     return len(rows)
 
 
