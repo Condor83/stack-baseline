@@ -7,7 +7,7 @@ from .signatures import (
     ERC1155_TRANSFER_SINGLE_TOPIC,
     ERC1155_TRANSFER_BATCH_TOPIC,
 )
-from .registries import ANCHORS_BY_CHAIN
+from .anchors import anchors_for_chain
 
 
 def classify_tx(
@@ -30,7 +30,7 @@ def classify_tx(
 
     details = {}
     to_addr_l = (to_address or "").lower()
-    anchors = ANCHORS_BY_CHAIN.get(chain_id, {})
+    anchors = anchors_for_chain(chain_id)
     # Anchors: routers / settlement / exchange proxy
     if to_addr_l in anchors.get("univ2_router", set()) or to_addr_l in anchors.get("univ3_router", set()):
         return {
