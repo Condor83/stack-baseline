@@ -7,7 +7,7 @@ from ..config import get_settings
 from ..workers.prices import get_price as price_task
 from ..clients.prices import PriceService
 from ..utils.chains import is_native_address
-from ..clients.etherscan_v2 import EtherscanV2Client
+from ..clients.etherscan_v2 import EtherscanV2Client, EtherscanError
 from ..workers.ingest import fetch_account_txs
 from ..workers.decode import fetch_traces
 from ..celery_app import celery_app
@@ -240,13 +240,30 @@ def ingest_address_by_date(payload: Dict[str, Any] = Body(...)) -> Dict[str, Any
     window = int(payload.get("window", 10000))
     if not chain_id or not address:
         raise HTTPException(status_code=400, detail="chain_id and address are required")
-    start_ts = _parse_time_to_epoch(start_raw) if start_raw is not None else int(time.time()) - 24 * 3600
-    end_ts = _parse_time_to_epoch(end_raw) if end_raw is not None else int(time.time())
+    now_ts = int(time.time())
+    start_ts = _parse_time_to_epoch(start_raw) if start_raw is not None else now_ts - 24 * 3600
+    end_ts = _parse_time_to_epoch(end_raw) if end_raw is not None else now_ts
+    # Clamp end_ts to now to avoid provider "future" errors
+    if end_ts > now_ts:
+        end_ts = now_ts
     if end_ts < start_ts:
         raise HTTPException(status_code=400, detail="end must be >= start")
     client = EtherscanV2Client(chain_id)
-    start_block = client.get_block_number_by_time(start_ts, closest="after") or 0
-    end_block = client.get_block_number_by_time(end_ts, closest="before") or start_block
+    try:
+        start_block = client.get_block_number_by_time(start_ts, closest="after") or 0
+    except EtherscanError:
+        # Fallback: use 'before' and clamp to now
+        try:
+            start_block = client.get_block_number_by_time(min(start_ts, now_ts), closest="before") or 0
+        except Exception:
+            start_block = 0
+    try:
+        end_block = client.get_block_number_by_time(end_ts, closest="before") or start_block
+    except EtherscanError:
+        try:
+            end_block = client.get_block_number_by_time(now_ts, closest="before") or start_block
+        except Exception:
+            end_block = start_block
     if end_block < start_block:
         end_block = start_block
     task = fetch_account_txs.delay(chain_id, address, start_block, end_block, window)
