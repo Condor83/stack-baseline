@@ -15,7 +15,7 @@ from sqlalchemy import (
     UniqueConstraint,
     select,
 )
-from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.dialects.postgresql import insert, JSONB
 from sqlalchemy.engine import Connection
 
 
@@ -57,7 +57,41 @@ logs = Table(
     Column("address", LargeBinary),
     Column("topics", LargeBinary),  # we will pack as JSON-like bytes or concat; see helpers
     Column("data", LargeBinary),
-    Column("decoded_event", Text),
+    Column("decoded_event", JSONB),
+)
+
+
+token_transfers = Table(
+    "token_transfers",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("chain_id", Integer, nullable=False),
+    Column("tx_id", BigInteger, nullable=False),
+    Column("log_index", Integer, nullable=True),
+    Column("token_address", LargeBinary, nullable=False),
+    Column("from_address", LargeBinary, nullable=True),
+    Column("to_address", LargeBinary, nullable=True),
+    Column("standard", String(16), nullable=False),  # 'erc20' | 'erc721' | 'erc1155'
+    Column("value", Numeric(78, 0), nullable=True),
+    Column("token_id", Numeric(78, 0), nullable=True),
+)
+
+
+internal_txs = Table(
+    "internal_transactions",
+    metadata,
+    Column("id", BigInteger, primary_key=True, autoincrement=True),
+    Column("tx_id", BigInteger, nullable=True),
+    Column("trace_id", String(128), nullable=True),
+    Column("type", String(32), nullable=True),
+    Column("from_address", LargeBinary, nullable=True),
+    Column("to_address", LargeBinary, nullable=True),
+    Column("value", Numeric(78, 0), nullable=True),
+    Column("contract_address", LargeBinary, nullable=True),
+    Column("is_error", Integer, nullable=True),
+    Column("error_code", String(128), nullable=True),
+    Column("gas", BigInteger, nullable=True),
+    Column("gas_used", BigInteger, nullable=True),
 )
 
 
@@ -83,26 +117,42 @@ def _topics_to_bytes(topics: Optional[List[str]]) -> Optional[bytes]:
         return None
 
 
+def _parse_int(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str):
+        v = value.strip()
+        try:
+            if v.startswith("0x") or v.startswith("0X"):
+                return int(v, 16)
+            return int(v)
+        except Exception:
+            return None
+    return None
+
+
 def upsert_transaction(conn: Connection, chain_id: int, tx: Dict[str, Any]) -> Optional[int]:
     values = {
         "chain_id": chain_id,
         "hash": _hex_to_bytes(tx.get("hash")),
-        "block_number": int(tx.get("blockNumber")) if tx.get("blockNumber") else None,
+        "block_number": _parse_int(tx.get("blockNumber")),
         "block_hash": _hex_to_bytes(tx.get("blockHash")),
-        "transaction_index": int(tx.get("transactionIndex")) if tx.get("transactionIndex") else None,
+        "transaction_index": _parse_int(tx.get("transactionIndex")),
         "from_address": _hex_to_bytes(tx.get("from")),
         "to_address": _hex_to_bytes(tx.get("to")),
-        "value": int(tx.get("value")) if tx.get("value") else None,
+        "value": _parse_int(tx.get("value")),
         "input": _hex_to_bytes(tx.get("input")),
-        "nonce": int(tx.get("nonce")) if tx.get("nonce") else None,
-        "gas": int(tx.get("gas")) if tx.get("gas") else None,
-        "gas_price": int(tx.get("gasPrice")) if tx.get("gasPrice") else None,
-        "max_fee_per_gas": int(tx.get("maxFeePerGas")) if tx.get("maxFeePerGas") else None,
-        "max_priority_fee_per_gas": int(tx.get("maxPriorityFeePerGas")) if tx.get("maxPriorityFeePerGas") else None,
-        "status": int(tx.get("txreceipt_status")) if tx.get("txreceipt_status") else None,
-        "gas_used": int(tx.get("gasUsed")) if tx.get("gasUsed") else None,
-        "effective_gas_price": int(tx.get("effectiveGasPrice")) if tx.get("effectiveGasPrice") else None,
-        "timestamp": int(tx.get("timeStamp")) if tx.get("timeStamp") else None,
+        "nonce": _parse_int(tx.get("nonce")),
+        "gas": _parse_int(tx.get("gas")),
+        "gas_price": _parse_int(tx.get("gasPrice")),
+        "max_fee_per_gas": _parse_int(tx.get("maxFeePerGas")),
+        "max_priority_fee_per_gas": _parse_int(tx.get("maxPriorityFeePerGas")),
+        "status": _parse_int(tx.get("txreceipt_status")),
+        "gas_used": _parse_int(tx.get("gasUsed")),
+        "effective_gas_price": _parse_int(tx.get("effectiveGasPrice")),
+        "timestamp": _parse_int(tx.get("timeStamp")),
     }
     stmt = insert(transactions).values(**values).on_conflict_do_nothing(index_elements=[transactions.c.chain_id, transactions.c.hash])
     res = conn.execute(stmt)
@@ -119,12 +169,13 @@ def upsert_transaction(conn: Connection, chain_id: int, tx: Dict[str, Any]) -> O
 def insert_logs_for_tx(conn: Connection, tx_id: int, logs_payload: List[Dict[str, Any]]):
     rows = []
     for l in logs_payload:
-        if int(l.get("logIndex", 0)) < 0:
+        li = _parse_int(l.get("logIndex"))
+        if li is None:
             continue
         rows.append(
             {
                 "tx_id": tx_id,
-                "log_index": int(l.get("logIndex")),
+                "log_index": li,
                 "address": _hex_to_bytes(l.get("address")),
                 "topics": _topics_to_bytes(l.get("topics")),
                 "data": _hex_to_bytes(l.get("data")),
@@ -135,3 +186,88 @@ def insert_logs_for_tx(conn: Connection, tx_id: int, logs_payload: List[Dict[str
         return 0
     conn.execute(insert(logs), rows)
     return len(rows)
+
+
+def _topic_to_address(topic_hex: str) -> Optional[bytes]:
+    if not topic_hex or not isinstance(topic_hex, str):
+        return None
+    if topic_hex.startswith("0x"):
+        topic_hex = topic_hex[2:]
+    if len(topic_hex) < 40:
+        return None
+    try:
+        return bytes.fromhex(topic_hex[-40:])
+    except Exception:
+        return None
+
+
+ERC_TRANSFER_SIG = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+
+
+def insert_token_transfers_from_logs(
+    conn: Connection, chain_id: int, tx_id: int, logs_payload: List[Dict[str, Any]]
+) -> int:
+    rows = []
+    for l in logs_payload:
+        topics = l.get("topics") or []
+        if not topics:
+            continue
+        topic0 = topics[0].lower() if isinstance(topics[0], str) else None
+        if topic0 != ERC_TRANSFER_SIG:
+            continue
+        addr = _hex_to_bytes(l.get("address"))
+        li = _parse_int(l.get("logIndex"))
+        if addr is None:
+            continue
+        # ERC-20 Transfer: topics length == 3 (topic0, from, to); value in data
+        # ERC-721 Transfer: topics length == 4 (topic0, from, to, tokenId); value absent
+        if len(topics) == 3:
+            from_addr = _topic_to_address(topics[1])
+            to_addr = _topic_to_address(topics[2])
+            value = _parse_int(l.get("data"))
+            rows.append(
+                {
+                    "chain_id": chain_id,
+                    "tx_id": tx_id,
+                    "log_index": li,
+                    "token_address": addr,
+                    "from_address": from_addr,
+                    "to_address": to_addr,
+                    "standard": "erc20",
+                    "value": value,
+                    "token_id": None,
+                }
+            )
+        elif len(topics) == 4:
+            from_addr = _topic_to_address(topics[1])
+            to_addr = _topic_to_address(topics[2])
+            token_id = _parse_int(topics[3])
+            rows.append(
+                {
+                    "chain_id": chain_id,
+                    "tx_id": tx_id,
+                    "log_index": li,
+                    "token_address": addr,
+                    "from_address": from_addr,
+                    "to_address": to_addr,
+                    "standard": "erc721",
+                    "value": None,
+                    "token_id": token_id,
+                }
+            )
+    if not rows:
+        return 0
+    conn.execute(insert(token_transfers), rows)
+    return len(rows)
+
+
+def update_transaction_receipt_fields(
+    conn: Connection, chain_id: int, tx_hash: bytes, status: Optional[int], gas_used: Optional[int], effective_gas_price: Optional[int]
+) -> None:
+    from sqlalchemy import update
+    stmt = (
+        update(transactions)
+        .where(transactions.c.chain_id == chain_id, transactions.c.hash == tx_hash)
+        .values(status=status, gas_used=gas_used, effective_gas_price=effective_gas_price)
+    )
+    conn.execute(stmt)

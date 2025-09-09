@@ -45,11 +45,28 @@ Database (Postgres/Supabase)
 Ingestion endpoints and tasks
 - Trigger address ingest (queues a Celery task):
   - `POST /api/v1/ingest/address` with JSON `{ "chain_id": 1, "address": "0x...", "start_block": 0, "end_block": 99999999, "window": 10000 }`
+  - Or by date/time: `POST /api/v1/ingest/address_by_date` with `{ "chain_id": 1, "address": "0x...", "start": "2024-01-01T00:00:00Z", "end": "2024-01-02", "window": 10000 }`
+    - `start`/`end` accept epoch seconds or ISO8601 (YYYY-MM-DD, or full timestamp; Z or timezone offsets supported).
+- Check task status:
+  - `GET /api/v1/tasks/{task_id}` → `{ state: PENDING|STARTED|SUCCESS|FAILURE, result?: any }`
 - Workers to run:
   - `celery -A evm_decoder.celery_app.celery_app worker -Q ingest -l info`
 - Current persistence:
   - Transactions → `transactions` table (upsert on (chain_id, hash))
-  - Logs → `logs` table (linked to `transactions.id` via `tx_id`)
+  - Receipts → update `status`, `gas_used`, `effective_gas_price`
+  - Logs → `logs` table (per-receipt logs, linked via `tx_id`)
+  - Token transfers → `token_transfers` (ERC-20/721 from logs)
+  - Internal txs → `internal_transactions` via Etherscan `txlistinternal`
+
+Validation endpoints
+- Address summary: `GET /api/v1/address/{chain_id}/{address}/summary?from_block=&to_block=`
+- Address transactions: `GET /api/v1/address/{chain_id}/{address}/transactions?limit=25&offset=0&from_block=&to_block=`
+- Address logs: `GET /api/v1/address/{chain_id}/{address}/logs?limit=25&offset=0&from_block=&to_block=`
+- Address token transfers: `GET /api/v1/address/{chain_id}/{address}/token_transfers?limit=25&offset=0&from_block=&to_block=`
+
+Smoke test script
+- Run: `python scripts/smoke_api.py 0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48 --chain-id 1 --from-block 18000000 --to-block 18001000 --ingest`
+- Options: `--base-url`, `--limit/--offset`, `--price-ts`.
 
 Supabase CLI workflow (optional but recommended)
 - `supabase start` or `supabase db start` to run local stack.
@@ -57,6 +74,11 @@ Supabase CLI workflow (optional but recommended)
 - Apply locally: `supabase db reset` (drops and reapplies migrations).
 - Point app to local DB: `DATABASE_URL=postgresql+psycopg://postgres:postgres@127.0.0.1:54322/postgres`.
 - Link and push to remote: `supabase link --project-ref <ref>` then `supabase db push`.
+
+Traces (Alchemy, optional)
+- Client stub added in `evm_decoder/clients/alchemy.py` for `trace_transaction` and `debug_traceTransaction`.
+- Disabled by default unless `ALCHEMY_API_KEY` is set and invoked by a worker.
+- Next: add budget guard and per-chain host mapping (eth-mainnet, arb-mainnet, opt-mainnet, etc.).
 
 Redis notes
 - We use Redis for: Celery broker/results, rate limiting, and simple caches.

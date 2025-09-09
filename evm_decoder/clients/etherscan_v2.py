@@ -48,9 +48,22 @@ class EtherscanV2Client:
             raise EtherscanError(f"HTTP {resp.status_code}: {resp.text}")
         data = resp.json()
         status = str(data.get("status", "1"))
-        if status != "1" and data.get("message") not in ("OK", "No records found"):
-            # Etherscan sometimes returns status=0 with message "No records found"
-            raise EtherscanError(f"API Error: {data}")
+        message = str(data.get("message", "")).lower()
+        if status != "1":
+            # Treat empty-list result as a non-error (common for no data)
+            res = data.get("result", None)
+            if isinstance(res, list) and len(res) == 0:
+                return data
+            # Treat common "no data" messages as non-errors
+            allowed = (
+                "no records found",
+                "no transactions found",
+                "no internal transactions found",
+                "no data found",
+            )
+            norm = " ".join(message.split())
+            if not any(m in norm for m in allowed):
+                raise EtherscanError(f"API Error: {data}")
         return data
 
     def get_txlist(
@@ -110,6 +123,52 @@ class EtherscanV2Client:
             for i, t in enumerate(topics):
                 params[f"topic{i}"] = t
         return self._request(params)
+
+    def get_tx_receipt(self, tx_hash: str) -> Optional[Dict]:
+        """Fetch transaction receipt via Etherscan proxy (JSON-RPC).
+
+        Returns the 'result' object or None on miss/error.
+        """
+        # Respect provider RPS limits
+        with self.limiter.limit("etherscan", self.settings.etherscan_rps, 1):
+            req_params = {
+                "chainid": str(self.chain_id),
+                "apikey": self.settings.etherscan_api_key or "",
+                "module": "proxy",
+                "action": "eth_getTransactionReceipt",
+                "txhash": tx_hash,
+            }
+            resp = self.client.get(self.base_url, params=req_params)
+        if resp.status_code != 200:
+            return None
+        try:
+            data = resp.json()
+        except Exception:
+            return None
+        # Expect result to be an object or null; if it's a string error, treat as miss
+        res = data.get("result")
+        if isinstance(res, dict):
+            return res
+        return None
+
+    def get_block_number_by_time(self, timestamp: int, closest: str = "before") -> Optional[int]:
+        """Map a unix timestamp to the nearest block number using Etherscan.
+
+        closest: 'before'|'after'
+        """
+        data = self._request(
+            {
+                "module": "block",
+                "action": "getblocknobytime",
+                "timestamp": str(timestamp),
+                "closest": closest,
+            }
+        )
+        res = data.get("result")
+        try:
+            return int(res)
+        except Exception:
+            return None
 
     def iter_txlist_block_windows(
         self,
