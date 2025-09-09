@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     # Providers
     etherscan_api_key: Optional[str] = Field(None, env="ETHERSCAN_API_KEY")
     coingecko_api_key: Optional[str] = Field(None, env="COINGECKO_API_KEY")
+    coingecko_api_tier: str = Field(
+        "free", env=["COINGECKO_API_TIER", "coingecko_api_tier"]
+    )  # values: free|demo|pro
     alchemy_api_key: Optional[str] = Field(None, env="ALCHEMY_API_KEY")
 
     # Rate limits (RPS)

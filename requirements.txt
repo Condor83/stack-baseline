@@ -8,3 +8,5 @@ pydantic>=2,<3
 pydantic-settings>=2
 python-dotenv
 orjson
+SQLAlchemy>=2.0
+psycopg[binary]>=3.1

@@ -1,12 +1,18 @@
 import math
 import time
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 
 import httpx
 from tenacity import retry, retry_if_exception_type, stop_after_attempt, wait_exponential_jitter
 
 from ..config import get_settings
 from ..rate_limiter import build_limiter, rps_to_window
+from ..utils.chains import (
+    coingecko_platform,
+    coingecko_native_coin_id,
+    llama_chain_slug,
+    is_native_address,
+)
 
 
 class PriceError(Exception):
@@ -67,37 +73,101 @@ class PriceService:
         return price
 
     # --- Providers ---
-    @retry(
-        retry=retry_if_exception_type(PriceError),
-        wait=wait_exponential_jitter(initial=0.5, max=5),
-        stop=stop_after_attempt(4),
-        reraise=True,
-    )
     def _from_coingecko(self, chain_id: int, contract: str, minute: int) -> Optional[Tuple[float, str]]:
-        # NOTE: Implement the correct mapping from chain_id→coingecko platform and
-        # use contract-address routes with /market_chart/range. For now, stubbed.
+        # Historical minute price via /market_chart/range
         if float(self.settings.coingecko_rps) <= 0:
             return None
         win = rps_to_window(float(self.settings.coingecko_rps))
         win.key = "coingecko"
         with self.limiter.limit(win.key, win.limit, win.window_seconds):
-            # TODO: add real request/response parsing
-            return None
+            try:
+                from_ts = minute - 60
+                to_ts = minute + 60
+                headers = {}
+                params_auth = {}
+                tier = (self.settings.coingecko_api_tier or "free").lower()
+                if tier == "pro" and self.settings.coingecko_api_key:
+                    base = "https://pro-api.coingecko.com/api/v3"
+                    headers["x-cg-pro-api-key"] = self.settings.coingecko_api_key
+                else:
+                    # default to public API host; if key present, pass via demo query param
+                    base = "https://api.coingecko.com/api/v3"
+                    if self.settings.coingecko_api_key:
+                        params_auth["x_cg_demo_api_key"] = self.settings.coingecko_api_key
 
-    @retry(
-        retry=retry_if_exception_type(PriceError),
-        wait=wait_exponential_jitter(initial=0.5, max=5),
-        stop=stop_after_attempt(4),
-        reraise=True,
-    )
+                if is_native_address(contract):
+                    coin_id = coingecko_native_coin_id(chain_id)
+                    if not coin_id:
+                        return None
+                    url = f"{base}/coins/{coin_id}/market_chart/range"
+                    params = {"vs_currency": "usd", "from": str(from_ts), "to": str(to_ts), **params_auth}
+                else:
+                    platform = coingecko_platform(chain_id)
+                    if not platform:
+                        return None
+                    url = f"{base}/coins/{platform}/contract/{contract}/market_chart/range"
+                    params = {"vs_currency": "usd", "from": str(from_ts), "to": str(to_ts), **params_auth}
+
+                resp = self.http.get(url, params=params, headers=headers)
+                if resp.status_code == 429:
+                    return None
+                if resp.status_code >= 500:
+                    return None
+                if resp.status_code != 200:
+                    # 4xx most likely invalid request/unauthorized/missing mapping; treat as miss
+                    return None
+                data = resp.json()
+                prices: List[List[float]] = data.get("prices") or []
+                if not prices:
+                    return None
+                # prices: [[ms, price], ...]; pick latest at or before minute+60s
+                cutoff_ms = (minute + 60) * 1000
+                candidates = [p for p in prices if int(p[0]) <= cutoff_ms]
+                if not candidates:
+                    return None
+                val = float(candidates[-1][1])
+                return val, "coingecko"
+            except Exception as e:
+                return None
+
     def _from_llama(self, chain_id: int, contract: str, minute: int) -> Optional[Tuple[float, str]]:
         if float(self.settings.llama_rps) <= 0:
             return None
         win = rps_to_window(float(self.settings.llama_rps))
         win.key = "defillama"
         with self.limiter.limit(win.key, win.limit, win.window_seconds):
-            # TODO: add real request/response parsing
-            return None
+            try:
+                if is_native_address(contract):
+                    # Use coingecko:<coin_id> key for native assets
+                    coin_id = coingecko_native_coin_id(chain_id)
+                    if not coin_id:
+                        return None
+                    coin_key = f"coingecko:{coin_id}"
+                else:
+                    slug = llama_chain_slug(chain_id)
+                    if not slug:
+                        return None
+                    coin_key = f"{slug}:{contract.lower()}"
+
+                url = f"https://coins.llama.fi/prices/historical/{minute}/{coin_key}"
+                resp = self.http.get(url)
+                if resp.status_code == 429:
+                    return None
+                if resp.status_code >= 500:
+                    return None
+                if resp.status_code != 200:
+                    return None
+                data = resp.json()
+                coins = data.get("coins") or {}
+                rec = coins.get(coin_key)
+                if not rec:
+                    return None
+                price = rec.get("price")
+                if price is None:
+                    return None
+                return float(price), "defillama"
+            except Exception as e:
+                return None
 
     def _from_alchemy(self, chain_id: int, contract: str, minute: int) -> Optional[Tuple[float, str]]:
         # Guard with daily budget; increment a Redis counter

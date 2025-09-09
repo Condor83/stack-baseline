@@ -1,3 +1,5 @@
+-- Migrated from migrations/001_init.sql
+
 -- Exemplar DDL based on PRD; adapt as needed.
 
 CREATE TABLE IF NOT EXISTS contracts (
@@ -95,3 +97,4 @@ CREATE TABLE IF NOT EXISTS mev_findings (
   score numeric(4,2),
   details_json jsonb
 );
+
