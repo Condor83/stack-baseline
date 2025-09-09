@@ -106,3 +106,7 @@ Redis notes
 
 Status
 This is a scaffold. Network client methods are wired with rate limiting and retries but contain TODOs to complete decoding logic, price provider request/response parsing, and persistence.
+
+Anchors (blue‑chip catalogs)
+- File-backed anchors live at `config/anchors.json` (loaded automatically). Override path via `ANCHORS_FILE`.
+- Classifier uses anchors to boost confidence for top protocols (Uniswap, Balancer, 1inch/0x, CoWSwap, ParaSwap, Euler, Silo v2). Add/update addresses as needed.
